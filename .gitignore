@@ -1,0 +1,14 @@
+*.nds
+*.elf
+*.bin
+*.map
+*.dump
+
+build/
+arm9/build/
+arm7/build/
+
+*.d
+*.o
+
+*.sh
