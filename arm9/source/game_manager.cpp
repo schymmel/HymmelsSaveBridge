@@ -9,6 +9,7 @@
 #include <nds.h>
 #include <nds/card.h>
 #include <nds/system.h>
+#include "read_card.h"
 
 extern int g_total_games;
 
@@ -18,6 +19,17 @@ static int s_scanned_folders = 0;
 static int s_found_nds = 0;
 
 const char* TWILIGHT_INI = "sd:/_nds/TWiLightMenu/settings.ini";
+
+typedef struct {
+    bool saves_in_folder;
+    char custom_save_path[MAX_PATH_LEN];
+} SaveConfig;
+
+static bool is_hidden_homebrew_id(const char* game_id) {
+    if (!game_id) return false;
+    // Skip homebrew and TWiLight Menu (SRLA)
+    return strcmp(game_id, "####") == 0 || strcmp(game_id, "SRLA") == 0;
+}
 
 static const char* maker_name_from_code(const char* maker_code) {
     if (strcmp(maker_code, "01") == 0) return "Nintendo";
@@ -45,20 +57,73 @@ static void set_publisher_from_maker(GameInfo* info, const char* maker_code) {
     }
 }
 
-bool get_twilight_save_setting(void) {
+static void trim_twilight_line(char* str) {
+    char* end;
+    // Trim leading space
+    while(isspace((unsigned char)*str)) str++;
+    if(*str == 0) return;
+    // Trim trailing space
+    end = str + strlen(str) - 1;
+    while(end > str && isspace((unsigned char)*end)) end--;
+    end[1] = '\0';
+}
+
+void get_twilight_save_config(SaveConfig* config) {
+    memset(config, 0, sizeof(SaveConfig));
+    // Default to saves folder if something is wrong
+    config->saves_in_folder = true;
+
     FILE* f = fopen(TWILIGHT_INI, "r");
-    if (!f) return false;
+    if (!f) return;
 
     char line[256];
-    bool in_folder = false;
     while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, "SAVES_IN_SD_FOLDER") && strstr(line, "= 1")) {
-            in_folder = true;
-            break;
+        char* ptr = strchr(line, '=');
+        if (!ptr) continue;
+
+        *ptr = '\0';
+        char* key = line;
+        char* val = ptr + 1;
+        trim_twilight_line(key);
+        trim_twilight_line(val);
+
+        if (strcmp(key, "SAVES_IN_SD_FOLDER") == 0) {
+            config->saves_in_folder = (val[0] == '1');
+        } else if (strcmp(key, "SAVE_LOCATION") == 0) {
+            // 0: saves folder, 1: rom folder, 2: _nds/TWiLightMenu/saves
+            if (val[0] == '0') {
+                config->saves_in_folder = true;
+            } else if (val[0] == '1') {
+                config->saves_in_folder = false;
+            } else if (val[0] == '2') {
+                snprintf(config->custom_save_path, sizeof(config->custom_save_path), "sd:/_nds/TWiLightMenu/saves");
+            }
+        } else if (strcmp(key, "SAVES_PATH") == 0) {
+            // TWiLight Menu uses paths like "/saves" or "sd:/saves"
+            if (val[0] != '\0') {
+                if (strncmp(val, "sd:", 3) == 0) {
+                    snprintf(config->custom_save_path, sizeof(config->custom_save_path), "%s", val);
+                } else if (val[0] == '/') {
+                    snprintf(config->custom_save_path, sizeof(config->custom_save_path), "sd:%s", val);
+                } else {
+                    snprintf(config->custom_save_path, sizeof(config->custom_save_path), "sd:/%s", val);
+                }
+                
+                // Remove trailing slash
+                size_t len = strlen(config->custom_save_path);
+                if (len > 0 && config->custom_save_path[len-1] == '/') {
+                    config->custom_save_path[len-1] = '\0';
+                }
+            }
         }
     }
     fclose(f);
-    return in_folder;
+}
+
+bool get_twilight_save_setting(void) {
+    SaveConfig config;
+    get_twilight_save_config(&config);
+    return config.saves_in_folder;
 }
 
 bool read_rom_header(const char* path, char* out_id, char* out_name) {
@@ -166,10 +231,9 @@ static bool read_slot1_banner(const uint8_t* header, GameInfo* info) {
     if (banner_offset == 0) return false;
 
     uint8_t banner_data[2560] = {0};
-    sysSetCardOwner(BUS_OWNER_ARM9);
-    for(int i=0; i<10; i++) swiWaitForVBlank();
-
-    cardRead(banner_data, banner_offset, 2560, 0);
+    for (uint32_t offset = 0; offset < sizeof(banner_data); offset += 0x200) {
+        gm9CardRead(banner_offset + offset, banner_data + offset, false);
+    }
 
     return decode_banner_data(banner_data, info);
 }
@@ -196,6 +260,8 @@ bool read_rom_banner(const char* path, GameInfo* info) {
 
 static void add_game_instance(const char* rom_path, const char* save_path,
                               const char* game_id, const char* game_name, bool is_slot1) {
+    if (is_hidden_homebrew_id(game_id)) return;
+
     GameInfo* info = g_game_list;
     GameInfo* prev = nullptr;
 
@@ -234,7 +300,7 @@ static void add_game_instance(const char* rom_path, const char* save_path,
 }
 
 const char* IGNORE_DIRS[] = {
-    "3ds", "Nintendo 3DS", "_nds", "luma", "gm9", "hsb", "System Volume Information", "photochannel", "DCIM", "private", "Nintendo DSi", "DSiWare", nullptr
+    "3ds", "Nintendo 3DS", "_nds", "luma", "gm9", "System Volume Information", "photochannel", "DCIM", "private", "Nintendo DSi", "DSiWare", nullptr
 };
 
 static bool is_blacklisted(const char* dir_name) {
@@ -244,7 +310,7 @@ static bool is_blacklisted(const char* dir_name) {
     return false;
 }
 
-static void scan_dir_recursive(const char* dir_path, bool saves_in_folder, scan_callback_t cb) {
+static void scan_dir_recursive(const char* dir_path, const SaveConfig* config, scan_callback_t cb) {
     DIR* dir = opendir(dir_path);
     if (!dir) return;
 
@@ -262,7 +328,7 @@ static void scan_dir_recursive(const char* dir_path, bool saves_in_folder, scan_
         struct stat st;
         if (stat(full_path, &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
-                scan_dir_recursive(full_path, saves_in_folder, cb);
+                scan_dir_recursive(full_path, config, cb);
             } else {
                 const char* ext = strrchr(entry->d_name, '.');
                 if (ext && strcasecmp(ext, ".nds") == 0) {
@@ -270,15 +336,38 @@ static void scan_dir_recursive(const char* dir_path, bool saves_in_folder, scan_
                     char game_name[13];
                     if (read_rom_header(full_path, game_id, game_name)) {
                         char save_path[MAX_PATH_LEN];
-                        if (saves_in_folder) {
-                            snprintf(save_path, sizeof(save_path), "sd:/saves/%s.sav", entry->d_name);
+                        
+                        // Extract ROM name without extension
+                        char rom_name[MAX_PATH_LEN];
+                        strncpy(rom_name, entry->d_name, sizeof(rom_name) - 1);
+                        rom_name[sizeof(rom_name) - 1] = '\0';
+                        char* dot = strrchr(rom_name, '.');
+                        if (dot) *dot = '\0';
+
+                        if (config->custom_save_path[0] != '\0') {
+                            strncpy(save_path, config->custom_save_path, sizeof(save_path) - 1);
+                            save_path[sizeof(save_path) - 1] = '\0';
+                            strncat(save_path, "/", sizeof(save_path) - strlen(save_path) - 1);
+                            strncat(save_path, rom_name, sizeof(save_path) - strlen(save_path) - 1);
+                            strncat(save_path, ".sav", sizeof(save_path) - strlen(save_path) - 1);
+                        } else if (config->saves_in_folder) {
+                            strncpy(save_path, dir_path, sizeof(save_path) - 1);
+                            save_path[sizeof(save_path) - 1] = '\0';
+                            strncat(save_path, "/saves/", sizeof(save_path) - strlen(save_path) - 1);
+                            strncat(save_path, rom_name, sizeof(save_path) - strlen(save_path) - 1);
+                            strncat(save_path, ".sav", sizeof(save_path) - strlen(save_path) - 1);
                         } else {
-                            snprintf(save_path, sizeof(save_path), "%s", full_path);
-                            char* s_ext = strrchr(save_path, '.');
-                            if (s_ext) strcpy(s_ext, ".sav");
+                            strncpy(save_path, dir_path, sizeof(save_path) - 1);
+                            save_path[sizeof(save_path) - 1] = '\0';
+                            strncat(save_path, "/", sizeof(save_path) - strlen(save_path) - 1);
+                            strncat(save_path, rom_name, sizeof(save_path) - strlen(save_path) - 1);
+                            strncat(save_path, ".sav", sizeof(save_path) - strlen(save_path) - 1);
                         }
-                        add_game_instance(full_path, save_path, game_id, game_name, false);
-                        s_found_nds++;
+                        
+                        if (!is_hidden_homebrew_id(game_id)) {
+                            add_game_instance(full_path, save_path, game_id, game_name, false);
+                            s_found_nds++;
+                        }
                     }
                 }
             }
@@ -289,7 +378,8 @@ static void scan_dir_recursive(const char* dir_path, bool saves_in_folder, scan_
 
 extern int g_total_games;
 
-void refresh_slot1(void) {
+bool refresh_slot1(void) {
+    bool changed = false;
     GameInfo* info = g_game_list;
     GameInfo* prev = nullptr;
     while (info) {
@@ -302,23 +392,27 @@ void refresh_slot1(void) {
             free(target->instances);
             free(target);
             g_total_games--;
+            changed = true;
         } else {
             prev = info;
             info = info->next;
         }
     }
 
-    sysSetCardOwner(BUS_OWNER_ARM9);
+    sNDSHeaderExt header_info = {0};
+    if (gm9CardInit(&header_info) != 0) {
+        return changed;
+    }
 
-    uint8_t header[512] = {0};
-    cardReadHeader(header);
+    uint8_t header_bytes[0x200] = {0};
+    gm9CardRead(0, header_bytes, false);
     char game_id[5] = {0};
-    memcpy(game_id, &header[0x0C], 4);
+    memcpy(game_id, &header_bytes[0x0C], 4);
 
-    if (game_id[0] != 0x00 && game_id[0] != 0xFF) {
-        char maker_code[3] = { (char)header[0x10], (char)header[0x11], 0 };
+    if (game_id[0] != 0x00 && game_id[0] != 0xFF && !is_hidden_homebrew_id(game_id)) {
+        char maker_code[3] = { (char)header_bytes[0x10], (char)header_bytes[0x11], 0 };
         char game_name[13] = {0};
-        memcpy(game_name, &header[0x00], 12);
+        memcpy(game_name, &header_bytes[0x00], 12);
         for (int i=0; i<12; i++) {
             if (!isprint((int)game_name[i]) || game_name[i] == '\r' || game_name[i] == '\n') {
                 game_name[i] = '\0';
@@ -338,12 +432,13 @@ void refresh_slot1(void) {
             inst->is_slot1 = true;
             inst->next = info->instances;
             info->instances = inst;
+            changed = true;
         } else {
             GameInfo* n_info = (GameInfo*)calloc(1, sizeof(GameInfo));
             snprintf(n_info->game_id, sizeof(n_info->game_id), "%s", game_id);
             snprintf(n_info->game_name, sizeof(n_info->game_name), "%s", game_name);
             set_publisher_from_maker(n_info, maker_code);
-            if (!read_slot1_banner(header, n_info)) {
+            if (!read_slot1_banner(header_bytes, n_info)) {
                 snprintf(n_info->long_name, sizeof(n_info->long_name), "%.12s (No Banner)", game_name);
                 for (int i = 0; i < 32 * 32; i++) n_info->icon[i] = RGB15(31,10,10) | BIT(15);
             }
@@ -356,8 +451,11 @@ void refresh_slot1(void) {
             n_info->next = g_game_list;
             g_game_list = n_info;
             g_total_games++;
+            changed = true;
         }
     }
+
+    return changed;
 }
 
 static void check_slot1(void) {
@@ -368,11 +466,12 @@ void scan_all_media(scan_callback_t cb) {
     s_scanned_folders = 0;
     s_found_nds = 0;
 
-    bool saves_in_folder = get_twilight_save_setting();
+    SaveConfig config;
+    get_twilight_save_config(&config);
 
     check_slot1();
 
-    scan_dir_recursive("sd:/", saves_in_folder, cb);
+    scan_dir_recursive("sd:/", &config, cb);
 }
 
 void free_game_list(void) {

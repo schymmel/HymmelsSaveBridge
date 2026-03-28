@@ -1,5 +1,6 @@
 #include "auxspi.h"
 #include "globals.h"
+#include "tonccpy.h"
 
 #include <algorithm>
 #include <stdio.h>
@@ -194,7 +195,7 @@ void auxspi_write_data(uint32 addr, uint8 *buf, uint32 cnt, uint8 type, auxspi_e
 		auxspi_wait_wip();
         auxspi_wait_busy();
 		auxspi_close();
-}
+	}
 }
 
 void auxspi_disable_extra(auxspi_extra extra) {
@@ -323,7 +324,7 @@ void auxspi_erase(auxspi_extra extra) {
 		}
 	} else {
 		int32 size = 1 << max(0, (auxspi_save_size_log_2(extra) - 15));
-		memset(data, 0, 0x8000);
+		toncset(data, 0, 0x8000);
 		for (int i = 0; i < size; i++) {
 			auxspi_write_data(i << 15, data, 0x8000, type, extra);
 		}

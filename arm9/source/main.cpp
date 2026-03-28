@@ -4,6 +4,7 @@
 
 #include "game_manager.h"
 #include "save_manager.h"
+#include "snapshot_save.h"
 #include "bg_top.h"
 #include "bg_bottom.h"
 #include <time.h>
@@ -47,6 +48,75 @@ int g_selected_slot_menu_idx = 0;
 int g_active_save_slot = 0;
 bool g_block_slot1_refresh = false;
 
+#ifndef SCFG_MC_IS_EJECTED
+#define SCFG_MC_IS_EJECTED (1U << 0)
+#endif
+
+static int s_cached_clock_second = -1;
+static int s_cached_clock_hour = 0;
+static int s_cached_clock_minute = 0;
+static int s_cached_clock_display_second = 0;
+static bool s_slot1_state_known = false;
+static bool s_slot1_present = false;
+static int s_slot1_poll_frames = 0;
+
+static void update_clock_cache(void) {
+    time_t t = time(nullptr);
+    if (t == (time_t)-1) return;
+
+    if ((int)t == s_cached_clock_second) return;
+
+    struct tm* tm = localtime(&t);
+    if (!tm) return;
+
+    s_cached_clock_second = (int)t;
+    s_cached_clock_hour = tm->tm_hour;
+    s_cached_clock_minute = tm->tm_min;
+    s_cached_clock_display_second = tm->tm_sec;
+}
+
+static void draw_clock_bar(void) {
+    consoleSelect(&topScreen);
+    printf("\x1b[0;0H%02d:%02d:%02d                 v0.1.0",
+           s_cached_clock_hour,
+           s_cached_clock_minute,
+           s_cached_clock_display_second);
+}
+
+static void prime_slot1_refresh_state(void) {
+    s_slot1_poll_frames = 0;
+    if (isDSiMode()) {
+        s_slot1_present = (REG_SCFG_MC & SCFG_MC_IS_EJECTED) == 0;
+        s_slot1_state_known = true;
+    } else {
+        s_slot1_present = false;
+        s_slot1_state_known = false;
+    }
+}
+
+static bool should_refresh_slot1_now(void) {
+    if (g_block_slot1_refresh) return false;
+
+    if (isDSiMode()) {
+        bool slot1_present_now = (REG_SCFG_MC & SCFG_MC_IS_EJECTED) == 0;
+        if (!s_slot1_state_known) {
+            s_slot1_present = slot1_present_now;
+            s_slot1_state_known = true;
+            return false;
+        }
+        if (slot1_present_now != s_slot1_present) {
+            s_slot1_present = slot1_present_now;
+            return true;
+        }
+        return false;
+    }
+
+    s_slot1_poll_frames++;
+    if (s_slot1_poll_frames < 1800) return false;
+    s_slot1_poll_frames = 0;
+    return true;
+}
+
 void get_slot_path(char* out_path, GameInstance* inst, int slot) {
     if (inst->is_slot1) {
         strcpy(out_path, inst->save_path);
@@ -68,21 +138,9 @@ void check_available_slots(GameInstance* inst) {
         return;
     }
 
-    char path_buf[MAX_PATH_LEN + 16];
-    get_slot_path(path_buf, inst, 0);
-    if (access(path_buf, F_OK) == 0) {
-        g_available_slots[g_num_available_slots++] = 0;
-    }
-
-    for (int i = 1; i <= 9; i++) {
-        get_slot_path(path_buf, inst, i);
-        if (access(path_buf, F_OK) == 0) {
-            g_available_slots[g_num_available_slots++] = i;
-        }
-    }
-
-    if (g_num_available_slots == 0) {
-        g_available_slots[g_num_available_slots++] = 0;
+    // Always allow all 10 slots for SD games so user can restore to a new one
+    for (int i = 0; i <= 9; i++) {
+        g_available_slots[g_num_available_slots++] = i;
     }
 }
 
@@ -184,11 +242,9 @@ void scan_progress_cb(int folders, int files, const char* current_path) {
 }
 
 extern "C" void refresh_clock_only(void) {
-    time_t t = time(nullptr);
-    struct tm *tm = localtime(&t);
+    update_clock_cache();
     const PrintConsole* prev = consoleGetDefault();
-    consoleSelect(&topScreen);
-    printf("\x1b[0;0H%02d:%02d:%02d                 v0.1.0", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    draw_clock_bar();
     if (prev) consoleSelect((PrintConsole*)prev);
 }
 
@@ -204,9 +260,8 @@ void draw_top_screen(void) {
     consoleSelect(&topScreen);
     consoleClear();
 
-    time_t t = time(nullptr);
-    struct tm *tm = localtime(&t);
-    printf("\x1b[0;0H%02d:%02d:%02d                 v0.1.0", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    update_clock_cache();
+    draw_clock_bar();
 
     if (g_total_games == 0) {
         printf("\n\n  No games found.\n");
@@ -335,13 +390,25 @@ void draw_bottom_screen(void) {
     } else if (g_bottom_state == BSTATE_SELECT_SLOT) {
         printf("\x1b[8;0H   [ SELECT SAVE SLOT ]\n");
         printf("  ============================\n\n");
-        for (int i = 0; i < g_num_available_slots && i < 6; i++) {
+        GameInstance* inst = get_instance_at_index(g_selected_instance_idx);
+        int start_idx = g_selected_slot_menu_idx > 3 ? g_selected_slot_menu_idx - 3 : 0;
+        if (start_idx > g_num_available_slots - 6) start_idx = g_num_available_slots - 6;
+        if (start_idx < 0) start_idx = 0;
+
+        for (int i = start_idx; i < start_idx + 6 && i < g_num_available_slots; i++) {
             int slot_id = g_available_slots[i];
             if (i == g_selected_slot_menu_idx) printf(" > ");
             else printf("   ");
 
-            if (slot_id == 0) printf("Default Save Slot (.sav)\n");
-            else printf("Save Slot %d (.sav%d)\n", slot_id, slot_id);
+            char path_buf[MAX_PATH_LEN + 16];
+            get_slot_path(path_buf, inst, slot_id);
+            bool exists = access(path_buf, F_OK) == 0;
+
+            if (slot_id == 0) printf("Default Slot (.sav)");
+            else printf("Save Slot %d (.sav%d)", slot_id, slot_id);
+            
+            if (!exists && !inst->is_slot1) printf(" [Empty]");
+            printf("\n");
         }
     } else if (g_bottom_state == BSTATE_ACTION || g_bottom_state == BSTATE_NONE) {
         BG_PALETTE_SUB[210] = RGB15(5,5,5);
@@ -452,6 +519,7 @@ int main(int argc, char **argv) {
 
     scan_all_media(scan_progress_cb);
     count_games();
+    prime_slot1_refresh_state();
 
     if (g_total_games > 0) {
         g_selected_game = get_game_at_index(0);
@@ -482,11 +550,8 @@ int main(int argc, char **argv) {
             printf("\x1b[23;0H Screenshot saved!           ");
         }
 
-        if (tick_frames % 180 == 0) {
-            int prev_total = g_total_games;
-            if (!g_block_slot1_refresh) refresh_slot1();
-
-            if (g_total_games != prev_total) {
+        if (should_refresh_slot1_now()) {
+            if (refresh_slot1()) {
                 if (g_selected_game_idx >= g_total_games) g_selected_game_idx = 0;
                 g_selected_game = get_game_at_index(g_selected_game_idx);
                 reload_instances();
@@ -496,10 +561,7 @@ int main(int argc, char **argv) {
             }
         }
         if (tick_frames % 60 == 0) {
-            time_t t = time(nullptr);
-            struct tm *tm = localtime(&t);
-            consoleSelect(&topScreen);
-            printf("\x1b[0;0H%02d:%02d:%02d                 v0.1.0", tm->tm_hour, tm->tm_min, tm->tm_sec);
+            refresh_clock_only();
         }
 
         keys_down = keysDown();
@@ -612,6 +674,15 @@ int main(int argc, char **argv) {
             }
 
             if (keys_down & KEY_L) {
+                GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
+                char check_path[MAX_PATH_LEN + 16];
+                get_slot_path(check_path, target_inst, g_active_save_slot);
+                if (access(check_path, F_OK) != 0 && !target_inst->is_slot1) {
+                    confirm_action("Error", "No save data found in this slot.");
+                    redraw_bottom = true;
+                    continue;
+                }
+
                 if (g_selected_backup_idx > 0) {
                    if (!confirm_action("Overwrite Backup", "Are you sure you want to overwrite?")) {
                        redraw_bottom = true;
@@ -736,7 +807,10 @@ int main(int argc, char **argv) {
                 BackupInfo* b = g_current_backups;
                 for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
 
-                if (b && confirm_action("Restore Backup", "Overwrite cartridge with backup?")) {
+                GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
+                const char* confirm_msg = target_inst->is_slot1 ? "Overwrite cartridge with backup?" : "Overwrite save with backup?";
+
+                if (b && confirm_action("Restore Backup", confirm_msg)) {
                    consoleSelect(&bottomScreen);
                    consoleClear();
                    printf("\n  Restoring Backup...\n  %s\n", b->file_name);
@@ -847,7 +921,7 @@ int main(int argc, char **argv) {
 
                    if (rename_buf[0] != '\0') {
                        char new_path[512];
-                       snprintf(new_path, sizeof(new_path), "sd:/snapshot/backups/%s/%s.sav", g_selected_game->game_id, rename_buf);
+                       snprintf(new_path, sizeof(new_path), "sd:/_nds/snapshot/backups/%s/%s.sav", g_selected_game->game_id, rename_buf);
                        rename(b->full_path, new_path);
                    }
 

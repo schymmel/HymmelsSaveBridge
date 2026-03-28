@@ -36,7 +36,7 @@ bool read_rom_header(const char* path, char* out_id, char* out_name);
 typedef void (*scan_callback_t)(int folders, int files, const char* current_path);
 
 void scan_all_media(scan_callback_t cb);
-void refresh_slot1(void);
+bool refresh_slot1(void);
 void free_game_list(void);
 
 #endif

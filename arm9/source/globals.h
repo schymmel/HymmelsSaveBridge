@@ -6,8 +6,6 @@
 
 extern uint8 data[0x8000];
 
-extern int ir_delay;
-
 extern char device[16];
 
 extern char txt[256];

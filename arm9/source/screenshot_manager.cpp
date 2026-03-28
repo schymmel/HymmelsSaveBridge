@@ -30,13 +30,13 @@ typedef struct {
 #pragma pack(pop)
 
 extern "C" bool take_screenshot(void) {
-    mkdir("sd:/snapshot", 0777);
-    mkdir("sd:/snapshot/screenshots", 0777);
+    mkdir("sd:/_nds/snapshot", 0777);
+    mkdir("sd:/_nds/snapshot/screenshots", 0777);
 
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     char path[128];
-    snprintf(path, sizeof(path), "sd:/snapshot/screenshots/Snapshot_%04d%02d%02d_%02d%02d%02d.bmp",
+    snprintf(path, sizeof(path), "sd:/_nds/snapshot/screenshots/Snapshot_%04d%02d%02d_%02d%02d%02d.bmp",
              tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
              tm->tm_hour, tm->tm_min, tm->tm_sec);
 
