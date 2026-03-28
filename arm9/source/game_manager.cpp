@@ -27,8 +27,8 @@ typedef struct {
 
 static bool is_hidden_homebrew_id(const char* game_id) {
     if (!game_id) return false;
-    // Skip homebrew and TWiLight Menu (SRLA)
-    return strcmp(game_id, "####") == 0 || strcmp(game_id, "SRLA") == 0;
+    // Skip homebrew, TWiLight Menu (SRLA), and known flashcards like DSPI
+    return strcmp(game_id, "####") == 0 || strcmp(game_id, "SRLA") == 0 || strcmp(game_id, "DSPI") == 0;
 }
 
 static const char* maker_name_from_code(const char* maker_code) {
@@ -180,48 +180,138 @@ static bool decode_banner_data(const uint8_t* banner_data, GameInfo* info) {
         }
     }
 
-    uint32_t title_offsets[] = {0x240, 0x340, 0x440, 0x540, 0x640, 0x740};
+    // Banner title offsets: 0=Japanese, 1=English, 2=French, 3=German, 4=Italian, 5=Spanish
+    // Each title is 128 bytes (64 UTF-16 characters)
+    uint32_t title_offsets[] = {0x240, 0x2C0, 0x340, 0x3C0, 0x440, 0x4C0};
     uint32_t title_offset = 0;
+    uint32_t utf16_title_offset = 0;  // Best title for UTF-16 rendering (may include CJK)
 
-    for (int l = 1; l >= 0; l--) {
-        uint32_t off = title_offsets[l];
-        const uint16_t* test_ptr = (const uint16_t*)(banner_data + off);
-        if (test_ptr[0] != 0 && test_ptr[0] != 0xFFFF) {
+    // Helper lambda to check if title contains non-ASCII
+    auto check_non_ascii = [&](uint32_t off) -> bool {
+        const uint16_t* ptr = (const uint16_t*)(banner_data + off);
+        for (int i = 0; i < 64 && ptr[i] != 0; i++) {
+            if (ptr[i] > 0x7F) return true;
+        }
+        return false;
+    };
+
+    // Helper lambda to check if title is valid (non-empty)
+    auto is_valid_title = [&](uint32_t off) -> bool {
+        const uint16_t* ptr = (const uint16_t*)(banner_data + off);
+        return ptr[0] != 0 && ptr[0] != 0xFFFF;
+    };
+
+    // For UTF-16 title (CJK rendering): prefer Japanese (0) > English (1) > others
+    int utf16_priority[] = {0, 1, 2, 3, 4, 5};
+    for (int p = 0; p < 6; p++) {
+        int lang = utf16_priority[p];
+        if (is_valid_title(title_offsets[lang])) {
+            utf16_title_offset = title_offsets[lang];
+            break;
+        }
+    }
+
+    // Priority for ASCII: English (1) > French (2) > German (3) > Spanish (5) > Italian (4) > Japanese (0)
+    // This ensures we get a Latin-script title when available
+    int lang_priority[] = {1, 2, 3, 5, 4, 0};
+    
+    for (int p = 0; p < 6; p++) {
+        int lang = lang_priority[p];
+        uint32_t off = title_offsets[lang];
+        if (is_valid_title(off) && !check_non_ascii(off)) {
             title_offset = off;
             break;
         }
     }
 
-    if (title_offset == 0) title_offset = title_offsets[0];
+    // If no ASCII-only title found, use English or Japanese as fallback
+    if (title_offset == 0) {
+        if (is_valid_title(title_offsets[1])) {
+            title_offset = title_offsets[1]; // English
+        } else if (is_valid_title(title_offsets[0])) {
+            title_offset = title_offsets[0]; // Japanese
+        } else {
+            title_offset = title_offsets[0]; // Default
+        }
+    }
 
-    const uint16_t* utf16_title = (const uint16_t*)(banner_data + title_offset);
+    // Store UTF-16 title for CJK font rendering
+    if (utf16_title_offset != 0) {
+        const uint16_t* src = (const uint16_t*)(banner_data + utf16_title_offset);
+        int j = 0;
+        for (int i = 0; i < 64 && src[i] != 0; i++) {
+            uint16_t c = src[i];
+            // Replace newlines with spaces
+            if (c == '\n' || c == '\r') {
+                if (j > 0 && info->long_name_utf16[j-1] != ' ')
+                    info->long_name_utf16[j++] = ' ';
+            } else {
+                info->long_name_utf16[j++] = c;
+            }
+        }
+        // Trim trailing spaces
+        while (j > 0 && info->long_name_utf16[j-1] == ' ') j--;
+        info->long_name_utf16[j] = 0;
+    }
+
+    // Generate ASCII fallback title
+    const uint16_t* utf16_title_ptr = (const uint16_t*)(banner_data + title_offset);
     int out_idx = 0;
-    for (int i = 0; i < 128 && out_idx < LONG_NAME_LEN - 3; i++) {
-        uint16_t wc = utf16_title[i];
+    int non_ascii_count = 0;
+    
+    for (int i = 0; i < 64 && out_idx < LONG_NAME_LEN - 4; i++) {
+        uint16_t wc = utf16_title_ptr[i];
         if (wc == 0) break;
         if (wc == '\n' || wc == '\r') {
-             if (out_idx > 0 && info->long_name[out_idx-1] != ' ')
-                 info->long_name[out_idx++] = ' ';
-             continue;
+            if (out_idx > 0 && info->long_name[out_idx-1] != ' ') {
+                info->long_name[out_idx++] = ' ';
+            }
+            continue;
         }
 
-        char c1 = 0, c2 = 0;
-        if (wc < 0x80) c1 = (char)wc;
-        else if (wc == 0x00E4) { c1 = 'a'; c2 = 'e'; }
-        else if (wc == 0x00F6) { c1 = 'o'; c2 = 'e'; }
-        else if (wc == 0x00FC) { c1 = 'u'; c2 = 'e'; }
-        else if (wc == 0x00C4) { c1 = 'A'; c2 = 'e'; }
-        else if (wc == 0x00D6) { c1 = 'O'; c2 = 'e'; }
-        else if (wc == 0x00DC) { c1 = 'U'; c2 = 'e'; }
-        else if (wc == 0x00DF) { c1 = 's'; c2 = 's'; }
-        else if (wc == 0x00E9) { c1 = 'e'; }
-        else if (wc < 0x100) { c1 = (char)wc; }
-        else c1 = '?';
+        // Handle UTF-16 surrogate pairs
+        uint32_t codepoint = 0;
+        if (wc >= 0xD800 && wc <= 0xDBFF) {
+            uint16_t low = utf16_title_ptr[++i];
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                codepoint = 0x10000 + (((wc - 0xD800) << 10) | (low - 0xDC00));
+            } else {
+                codepoint = 0xFFFD;
+                i--;
+            }
+        } else {
+            codepoint = wc;
+        }
 
-        info->long_name[out_idx++] = c1;
-        if (c2) info->long_name[out_idx++] = c2;
+        // ASCII-first fallback: map basic Latin and Latin-1 approximations
+        if (codepoint <= 0x7F) {
+            if (out_idx + 1 >= LONG_NAME_LEN) break;
+            info->long_name[out_idx++] = (char)codepoint;
+        } else if (codepoint < 0x100) {
+            char c1 = (char)codepoint;
+            switch (codepoint) {
+                case 0x00E4: c1 = 'a'; break; // ä
+                case 0x00F6: c1 = 'o'; break; // ö
+                case 0x00FC: c1 = 'u'; break; // ü
+                case 0x00C4: c1 = 'A'; break; // Ä
+                case 0x00D6: c1 = 'O'; break; // Ö
+                case 0x00DC: c1 = 'U'; break; // Ü
+                case 0x00DF: c1 = 's'; break; // ß
+                case 0x00E9: c1 = 'e'; break; // é
+            }
+            if (out_idx + 1 >= LONG_NAME_LEN) break;
+            info->long_name[out_idx++] = c1;
+        } else {
+            non_ascii_count++;
+        }
     }
     info->long_name[out_idx] = '\0';
+    
+    // If title is mostly non-ASCII (CJK-only), use ROM header name as fallback
+    if (out_idx < 3 && non_ascii_count > 2) {
+        info->long_name[0] = '\0';
+        return true;
+    }
 
     return true;
 }
@@ -230,12 +320,20 @@ static bool read_slot1_banner(const uint8_t* header, GameInfo* info) {
     uint32_t banner_offset = header[0x68] | (header[0x69] << 8) | (header[0x6A] << 16) | (header[0x6B] << 24);
     if (banner_offset == 0) return false;
 
-    uint8_t banner_data[2560] = {0};
-    for (uint32_t offset = 0; offset < sizeof(banner_data); offset += 0x200) {
+    // Read full banner (up to version 3 with all language titles)
+    // Allocate on heap to save stack space
+    // gm9CardRead always reads 0x200 bytes, so we need a buffer that is a multiple of 0x200
+    uint8_t* banner_data = (uint8_t*)malloc(0xC00);
+    if (!banner_data) return false;
+    memset(banner_data, 0, 0xC00);
+
+    for (uint32_t offset = 0; offset < 0xA40; offset += 0x200) {
         gm9CardRead(banner_offset + offset, banner_data + offset, false);
     }
 
-    return decode_banner_data(banner_data, info);
+    bool success = decode_banner_data(banner_data, info);
+    free(banner_data);
+    return success;
 }
 
 bool read_rom_banner(const char* path, GameInfo* info) {
@@ -247,15 +345,27 @@ bool read_rom_banner(const char* path, GameInfo* info) {
     if (fread(&banner_offset, 1, 4, fp) != 4) { fclose(fp); return false; }
     if (banner_offset == 0 || banner_offset > 0x10000000) { fclose(fp); return false; }
 
-    uint8_t banner_data[0x840];
+    // Read full banner (up to version 3 with all language titles)
+    // Allocate on heap to save stack space
+    uint8_t* banner_data = (uint8_t*)malloc(0xC00);
+    if (!banner_data) {
+        fclose(fp);
+        return false;
+    }
+    memset(banner_data, 0, 0xC00);
+
     fseek(fp, banner_offset, SEEK_SET);
-    if (fread(banner_data, 1, sizeof(banner_data), fp) != sizeof(banner_data)) {
+    size_t read = fread(banner_data, 1, 0xC00, fp);
+    if (read < 0x240) {  // Need at least Japanese title
+        free(banner_data);
         fclose(fp);
         return false;
     }
 
     fclose(fp);
-    return decode_banner_data(banner_data, info);
+    bool success = decode_banner_data(banner_data, info);
+    free(banner_data);
+    return success;
 }
 
 static void add_game_instance(const char* rom_path, const char* save_path,
@@ -317,13 +427,19 @@ static void scan_dir_recursive(const char* dir_path, const SaveConfig* config, s
     s_scanned_folders++;
     if (cb) cb(s_scanned_folders, s_found_nds, dir_path);
 
+    // Allocate paths on heap to save stack space during recursion
+    char* full_path = (char*)malloc(MAX_PATH_LEN);
+    if (!full_path) {
+        closedir(dir);
+        return;
+    }
+
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         if (entry->d_name[0] == '.') continue;
         if (is_blacklisted(entry->d_name)) continue;
 
-        char full_path[MAX_PATH_LEN];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+        snprintf(full_path, MAX_PATH_LEN, "%s/%s", dir_path, entry->d_name);
 
         struct stat st;
         if (stat(full_path, &st) == 0) {
@@ -335,44 +451,49 @@ static void scan_dir_recursive(const char* dir_path, const SaveConfig* config, s
                     char game_id[5];
                     char game_name[13];
                     if (read_rom_header(full_path, game_id, game_name)) {
-                        char save_path[MAX_PATH_LEN];
+                        char* save_path = (char*)malloc(MAX_PATH_LEN);
+                        char* rom_name = (char*)malloc(MAX_PATH_LEN);
                         
-                        // Extract ROM name without extension
-                        char rom_name[MAX_PATH_LEN];
-                        strncpy(rom_name, entry->d_name, sizeof(rom_name) - 1);
-                        rom_name[sizeof(rom_name) - 1] = '\0';
-                        char* dot = strrchr(rom_name, '.');
-                        if (dot) *dot = '\0';
+                        if (save_path && rom_name) {
+                            // Extract ROM name without extension
+                            strncpy(rom_name, entry->d_name, MAX_PATH_LEN - 1);
+                            rom_name[MAX_PATH_LEN - 1] = '\0';
+                            char* dot = strrchr(rom_name, '.');
+                            if (dot) *dot = '\0';
 
-                        if (config->custom_save_path[0] != '\0') {
-                            strncpy(save_path, config->custom_save_path, sizeof(save_path) - 1);
-                            save_path[sizeof(save_path) - 1] = '\0';
-                            strncat(save_path, "/", sizeof(save_path) - strlen(save_path) - 1);
-                            strncat(save_path, rom_name, sizeof(save_path) - strlen(save_path) - 1);
-                            strncat(save_path, ".sav", sizeof(save_path) - strlen(save_path) - 1);
-                        } else if (config->saves_in_folder) {
-                            strncpy(save_path, dir_path, sizeof(save_path) - 1);
-                            save_path[sizeof(save_path) - 1] = '\0';
-                            strncat(save_path, "/saves/", sizeof(save_path) - strlen(save_path) - 1);
-                            strncat(save_path, rom_name, sizeof(save_path) - strlen(save_path) - 1);
-                            strncat(save_path, ".sav", sizeof(save_path) - strlen(save_path) - 1);
-                        } else {
-                            strncpy(save_path, dir_path, sizeof(save_path) - 1);
-                            save_path[sizeof(save_path) - 1] = '\0';
-                            strncat(save_path, "/", sizeof(save_path) - strlen(save_path) - 1);
-                            strncat(save_path, rom_name, sizeof(save_path) - strlen(save_path) - 1);
-                            strncat(save_path, ".sav", sizeof(save_path) - strlen(save_path) - 1);
+                            if (config->custom_save_path[0] != '\0') {
+                                strncpy(save_path, config->custom_save_path, MAX_PATH_LEN - 1);
+                                save_path[MAX_PATH_LEN - 1] = '\0';
+                                strncat(save_path, "/", MAX_PATH_LEN - strlen(save_path) - 1);
+                                strncat(save_path, rom_name, MAX_PATH_LEN - strlen(save_path) - 1);
+                                strncat(save_path, ".sav", MAX_PATH_LEN - strlen(save_path) - 1);
+                            } else if (config->saves_in_folder) {
+                                strncpy(save_path, dir_path, MAX_PATH_LEN - 1);
+                                save_path[MAX_PATH_LEN - 1] = '\0';
+                                strncat(save_path, "/saves/", MAX_PATH_LEN - strlen(save_path) - 1);
+                                strncat(save_path, rom_name, MAX_PATH_LEN - strlen(save_path) - 1);
+                                strncat(save_path, ".sav", MAX_PATH_LEN - strlen(save_path) - 1);
+                            } else {
+                                strncpy(save_path, dir_path, MAX_PATH_LEN - 1);
+                                save_path[MAX_PATH_LEN - 1] = '\0';
+                                strncat(save_path, "/", MAX_PATH_LEN - strlen(save_path) - 1);
+                                strncat(save_path, rom_name, MAX_PATH_LEN - strlen(save_path) - 1);
+                                strncat(save_path, ".sav", MAX_PATH_LEN - strlen(save_path) - 1);
+                            }
+                            
+                            if (!is_hidden_homebrew_id(game_id)) {
+                                add_game_instance(full_path, save_path, game_id, game_name, false);
+                                s_found_nds++;
+                            }
                         }
-                        
-                        if (!is_hidden_homebrew_id(game_id)) {
-                            add_game_instance(full_path, save_path, game_id, game_name, false);
-                            s_found_nds++;
-                        }
+                        if (save_path) free(save_path);
+                        if (rom_name) free(rom_name);
                     }
                 }
             }
         }
     }
+    free(full_path);
     closedir(dir);
 }
 

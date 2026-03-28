@@ -19,141 +19,20 @@
 #define BACKUP_BUFFER_SIZE 32768
 #define BACKUP_BASE_DIR "sd:/_nds/snapshot/backups"
 
-// libnds-compatible EEPROM functions (to ensure correct behavior regardless of SDK)
-// Taken from https://github.com/devkitPro/libnds/blob/master/source/common/cardEeprom.c
+// Use libnds cardEeprom functions directly - same as GodMode9i
+// No need for custom implementations
 
-#define REG_AUXSPICNT_SNAPSHOT  (*(vu16*)0x040001A0)
-#define REG_AUXSPIDATA_SNAPSHOT (*(vu8*)0x040001A2)
-#define CARD_SPI_BUSY_SNAPSHOT  (1<<7)
-
-static inline void eepromWaitBusySnapshot() {
-    while (REG_AUXSPICNT_SNAPSHOT & CARD_SPI_BUSY_SNAPSHOT);
+// Wrapper functions to maintain existing call signatures
+static inline void cardReadEepromSnapshot(u32 address, u8 *data, u32 length, u32 addrtype) {
+    cardReadEeprom(address, data, length, addrtype);
 }
 
-static void cardReadEepromSnapshot(u32 address, u8 *data, u32 length, u32 addrtype) {
-    REG_AUXSPICNT_SNAPSHOT = 0x8000 | 0x2000 | 0x40;
-    REG_AUXSPIDATA_SNAPSHOT = 0x03 | ((addrtype == 1) ? address>>8<<3 : 0);
-    eepromWaitBusySnapshot();
-
-    if (addrtype == 3) {
-        REG_AUXSPIDATA_SNAPSHOT = (address >> 16) & 0xFF;
-        eepromWaitBusySnapshot();
-        REG_AUXSPIDATA_SNAPSHOT = (address >> 8) & 0xFF;
-        eepromWaitBusySnapshot();
-    } else if (addrtype == 2) {
-        REG_AUXSPIDATA_SNAPSHOT = (address >> 8) & 0xFF;
-        eepromWaitBusySnapshot();
-    }
-
-    REG_AUXSPIDATA_SNAPSHOT = (address) & 0xFF;
-    eepromWaitBusySnapshot();
-
-    while (length > 0) {
-        REG_AUXSPIDATA_SNAPSHOT = 0;
-        eepromWaitBusySnapshot();
-        *data++ = REG_AUXSPIDATA_SNAPSHOT;
-        length--;
-    }
-
-    eepromWaitBusySnapshot();
-    REG_AUXSPICNT_SNAPSHOT = 0x40;
+static inline void cardWriteEepromSnapshot(u32 address, u8 *data, u32 length, u32 addrtype) {
+    cardWriteEeprom(address, data, length, addrtype);
 }
 
-static void cardWriteEepromSnapshot(u32 address, u8 *data, u32 length, u32 addrtype) {
-    u32 address_end = address + length;
-    int i;
-    int maxblocks = 32;
-    if(addrtype == 1) maxblocks = 16;
-    if(addrtype == 2) maxblocks = 32;
-    if(addrtype == 3) maxblocks = 256;
-
-    while (address < address_end) {
-        // set WEL (Write Enable Latch)
-        REG_AUXSPICNT_SNAPSHOT = 0x8000 | 0x2000 | 0x40;
-        REG_AUXSPIDATA_SNAPSHOT = 0x06;
-        eepromWaitBusySnapshot();
-        REG_AUXSPICNT_SNAPSHOT = 0x40;
-
-        // program
-        REG_AUXSPICNT_SNAPSHOT = 0x8000 | 0x2000 | 0x40;
-
-        if(addrtype == 1) {
-            REG_AUXSPIDATA_SNAPSHOT = 0x02 | (address & BIT(8)) >> (8-3);
-            eepromWaitBusySnapshot();
-            REG_AUXSPIDATA_SNAPSHOT = address & 0xFF;
-            eepromWaitBusySnapshot();
-        }
-        else if(addrtype == 2) {
-            REG_AUXSPIDATA_SNAPSHOT = 0x02;
-            eepromWaitBusySnapshot();
-            REG_AUXSPIDATA_SNAPSHOT = (address >> 8) & 0xFF;
-            eepromWaitBusySnapshot();
-            REG_AUXSPIDATA_SNAPSHOT = address & 0xFF;
-            eepromWaitBusySnapshot();
-        }
-        else if(addrtype == 3) {
-            REG_AUXSPIDATA_SNAPSHOT = 0x02;
-            eepromWaitBusySnapshot();
-            REG_AUXSPIDATA_SNAPSHOT = (address >> 16) & 0xFF;
-            eepromWaitBusySnapshot();
-            REG_AUXSPIDATA_SNAPSHOT = (address >> 8) & 0xFF;
-            eepromWaitBusySnapshot();
-            REG_AUXSPIDATA_SNAPSHOT = address & 0xFF;
-            eepromWaitBusySnapshot();
-        }
-
-        // Write until end of data OR end of page (important for all types)
-        for (i=0; address<address_end && i<maxblocks; i++, address++) {
-            REG_AUXSPIDATA_SNAPSHOT = *data++;
-            eepromWaitBusySnapshot();
-            // Page boundary checks: Type 1: 16b, Type 2: 32b, Type 3: 256b
-            if (addrtype == 1 && (address & 0x0F) == 0) break;
-            if (addrtype == 2 && (address & 0x1F) == 0) break;
-            if (addrtype == 3 && (address & 0xFF) == 0) break;
-        }
-        REG_AUXSPICNT_SNAPSHOT = 0x40;
-
-        // wait programming to finish
-        REG_AUXSPICNT_SNAPSHOT = 0x8000 | 0x2000 | 0x40;
-        REG_AUXSPIDATA_SNAPSHOT = 0x05;
-        eepromWaitBusySnapshot();
-        do {
-            REG_AUXSPIDATA_SNAPSHOT = 0;
-            eepromWaitBusySnapshot();
-        } while (REG_AUXSPIDATA_SNAPSHOT & 0x01); // WIP (Write In Progress)
-        eepromWaitBusySnapshot();
-        REG_AUXSPICNT_SNAPSHOT = 0x40;
-    }
-}
-
-static void cardEepromSectorEraseSnapshot(u32 address) {
-    // set WEL (Write Enable Latch)
-    REG_AUXSPICNT_SNAPSHOT = 0x8000 | 0x2000 | 0x40;
-    REG_AUXSPIDATA_SNAPSHOT = 0x06;
-    eepromWaitBusySnapshot();
-    REG_AUXSPICNT_SNAPSHOT = 0x40;
-
-    // SectorErase 0xD8
-    REG_AUXSPICNT_SNAPSHOT = 0x8000 | 0x2000 | 0x40;
-    REG_AUXSPIDATA_SNAPSHOT = 0xD8;
-    eepromWaitBusySnapshot();
-    REG_AUXSPIDATA_SNAPSHOT = (address >> 16) & 0xFF;
-    eepromWaitBusySnapshot();
-    REG_AUXSPIDATA_SNAPSHOT = (address >> 8) & 0xFF;
-    eepromWaitBusySnapshot();
-    REG_AUXSPIDATA_SNAPSHOT = address & 0xFF;
-    eepromWaitBusySnapshot();
-    REG_AUXSPICNT_SNAPSHOT = 0x40;
-
-    // wait erase to finish
-    REG_AUXSPICNT_SNAPSHOT = 0x8000 | 0x2000 | 0x40;
-    REG_AUXSPIDATA_SNAPSHOT = 0x05;
-    eepromWaitBusySnapshot();
-    do {
-        REG_AUXSPIDATA_SNAPSHOT = 0;
-        eepromWaitBusySnapshot();
-    } while (REG_AUXSPIDATA_SNAPSHOT & 0x01); // WIP
-    REG_AUXSPICNT_SNAPSHOT = 0x40;
+static inline void cardEepromSectorEraseSnapshot(u32 address) {
+    cardEepromSectorErase(address);
 }
 
 static void create_dir_recursive(const char *dir) {
@@ -484,8 +363,8 @@ static const char* restore_slot1(const char* src_path) {
     }
 
     // Re-prepare bus after file operations (SD card access may have changed bus state)
-    sysSetCardOwner(BUS_OWNER_ARM9);
-    sysSetBusOwners(true, true);
+    // Use full prepare_slot1_bus() to ensure proper timing especially on problematic carts
+    prepare_slot1_bus();
 
     if (info.type == 3 && !info.nand) {
         progress_bar_begin("Erasing");
@@ -520,8 +399,7 @@ static const char* restore_slot1(const char* src_path) {
             }
 
             // Re-prepare bus after SD card access
-            sysSetCardOwner(BUS_OWNER_ARM9);
-            sysSetBusOwners(true, true);
+            prepare_slot1_bus();
 
             for (uint32_t offset = 0; offset < chunk; offset += 0x800) {
                 gm9CardWriteNand(buffer + offset, cardNandRwStart + dest + offset);
@@ -556,6 +434,8 @@ static const char* restore_slot1(const char* src_path) {
                 fclose(f);
                 return "Read fail";
             }
+            // Re-prepare bus after SD card access (critical for restore stability)
+            prepare_slot1_bus();
             auxspi_write_data(i << shift, buffer, len, info.type, info.card_type);
             progress_bar_step(i + 1, num_blocks, &write_printed);
             refresh_clock_only();
@@ -576,8 +456,7 @@ static const char* restore_slot1(const char* src_path) {
                 return "Read fail";
             }
             // Re-prepare bus after SD card access
-            sysSetCardOwner(BUS_OWNER_ARM9);
-            sysSetBusOwners(true, true);
+            prepare_slot1_bus();
             cardWriteEepromSnapshot(written, buffer, blocks, info.type);
             written += blocks;
             progress_bar_step(i + 1, 32, &write_printed);

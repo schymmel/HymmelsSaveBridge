@@ -1,10 +1,12 @@
 #include <stdio.h>
 #include <nds.h>
 #include <fat.h>
+#include <filesystem.h>
 
 #include "game_manager.h"
 #include "save_manager.h"
 #include "snapshot_save.h"
+#include "font.h"
 #include "bg_top.h"
 #include "bg_bottom.h"
 #include <time.h>
@@ -349,14 +351,34 @@ void draw_bottom_screen(void) {
     consoleClear();
 
     if (!g_selected_game) return;
-
-    char buffered_long_name[512] = {0};
-    int b_idx = 0;
-    for (int i = 0; g_selected_game->long_name[i] != '\0' && b_idx < 510; i++) {
-        char c = g_selected_game->long_name[i];
-        buffered_long_name[b_idx++] = c;
+    // Check if UTF-16 title contains non-ASCII (CJK) characters
+    bool has_cjk = false;
+    if (g_selected_game->long_name_utf16[0] != 0) {
+        for (int i = 0; i < 128 && g_selected_game->long_name_utf16[i]; i++) {
+            if (g_selected_game->long_name_utf16[i] > 0x7F) {
+                has_cjk = true;
+                break;
+            }
+        }
     }
-    printf("\x1b[0;0H%s", buffered_long_name);
+
+    // Render game title: use NFTR font only for CJK titles, ASCII console for the rest
+    if (has_cjk && fontAvailable()) {
+        // Set up font palette entries for 8bpp CJK rendering (base=248, vals 1-3)
+        BG_PALETTE_SUB[249] = RGB15(10, 10, 10);
+        BG_PALETTE_SUB[250] = RGB15(22, 22, 22);
+        BG_PALETTE_SUB[251] = RGB15(31, 31, 31);
+        fontPrintTitle8(vram, 2, 2, g_selected_game->long_name_utf16, 248);
+    } else {
+        char buffered_long_name[512] = {0};
+        int b_idx = 0;
+        for (int i = 0; g_selected_game->long_name[i] != '\0' && b_idx < 510; i++) {
+            char c = g_selected_game->long_name[i];
+            buffered_long_name[b_idx++] = c;
+        }
+        printf("\x1b[0;0H%s", buffered_long_name);
+    }
+
     printf("\x1b[2;0HID: %s", g_selected_game->game_id);
 
     GameInstance* inst = get_instance_at_index(g_selected_instance_idx);
@@ -488,7 +510,7 @@ int main(int argc, char **argv) {
     dmaCopy(bg_topBitmap, bgGetGfxPtr(g_bgTopImage), bg_topBitmapLen);
     dmaCopy(bg_topPal, BG_PALETTE, bg_topPalLen);
 
-    g_bgTopIcons = bgInit(3, BgType_Bmp16, BgSize_B16_256x256, 12, 0);
+    g_bgTopIcons = bgInit(3, BgType_Bmp16, BgSize_B16_256x256, 8, 0);
 
     g_bgBottom = bgInitSub(3, BgType_Bmp8, BgSize_B8_256x256, 4, 0);
     dmaCopy(bg_bottomPal, BG_PALETTE_SUB, bg_bottomPalLen);
@@ -516,6 +538,14 @@ int main(int argc, char **argv) {
         printf("Failed to init FAT!\n");
         while (1) { swiWaitForVBlank(); }
     }
+
+    // Initialize NitroFS for embedded font
+    if (!nitroFSInit(NULL)) {
+        // Failing to init NitroFS is not fatal; fontInit will handle the missing nitro:/ path
+    }
+
+    // Initialize CJK font (uses embedded font or TWiLightMenu fonts)
+    fontInit();
 
     scan_all_media(scan_progress_cb);
     count_games();
@@ -843,6 +873,10 @@ int main(int argc, char **argv) {
                        if (keysDown() & (KEY_B | KEY_A)) break;
                    }
                 }
+                redraw_bottom = true;
+            } else if (keys_down & KEY_R && g_selected_backup_idx == 0) {
+                // User pressed R but no backup is selected - show error
+                confirm_action("No Backup Selected", "Select a backup to restore first.");
                 redraw_bottom = true;
             } else if (keys_down & KEY_X && g_selected_backup_idx > 0) {
                 BackupInfo* b = g_current_backups;

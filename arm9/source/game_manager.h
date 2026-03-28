@@ -21,7 +21,8 @@ typedef struct GameInstance {
 typedef struct GameInfo {
     char game_id[GAME_ID_LEN + 1];
     char game_name[GAME_NAME_LEN + 1];
-    char long_name[LONG_NAME_LEN];
+    char long_name[LONG_NAME_LEN];       // ASCII fallback title
+    uint16_t long_name_utf16[128];       // Original UTF-16 banner title (for CJK)
     char publisher[64];
     uint16_t icon[32 * 32];
     GameInstance* instances;

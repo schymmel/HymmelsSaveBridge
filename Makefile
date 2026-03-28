@@ -16,6 +16,8 @@ ARM7DIR		:= arm7
 SDROOT		:= sdroot
 SDIMAGE		:= image.bin
 
+NITROFSDIR	:= nitrofiles
+
 ARM9ELF		:= $(ARM9DIR)/arm9.elf
 ARM7ELF		:= $(ARM7DIR)/arm7.elf
 ROM		:= $(NAME).nds
@@ -32,7 +34,8 @@ $(ROM): arm9 arm7
 	@echo "  NDSTOOL $@"
 	@$(BLOCKSDS)/tools/ndstool/ndstool -c $@ \
 		-7 $(ARM7ELF) -9 $(ARM9ELF) \
-		-b $(GAME_ICON) "$(GAME_TITLE);$(GAME_AUTHOR)"
+		-b $(GAME_ICON) "$(GAME_TITLE);$(GAME_AUTHOR)" \
+		-d $(NITROFSDIR)
 
 arm9:
 	@$(MAKE) -C $(ARM9DIR)

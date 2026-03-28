@@ -8,14 +8,6 @@
 #define REG_AUXSPICNT  (*(vu16*)0x040001A0)
 #define REG_AUXSPIDATA (*(vu8*)0x040001A2)
 
-// Custom delay function to match libnds behavior
-static inline void auxspi_delay(u32 cycles) {
-    // Simple busy loop delay
-    for (volatile u32 i = 0; i < cycles; i++) {
-        __asm__ volatile ("nop");
-    }
-}
-
 inline void auxspi_wait_busy() {
 	while (REG_AUXSPICNT & 0x80);
 }
@@ -63,8 +55,8 @@ inline uint16 auxspi_read_16() {
 
 inline void auxspi_disable_infrared_core() {
 	auxspi_open(0);
-	auxspi_delay(1200);
+	swiDelay(1200);
 	auxspi_open(2);
 	auxspi_write(0);
-	auxspi_delay(1200);
+	swiDelay(1200);
 }
