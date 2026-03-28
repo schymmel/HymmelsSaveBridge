@@ -18,13 +18,11 @@ Snapshot is a powerful save management tool for the Nintendo DS, inspired by the
 - **Custom Backups**: Create save backups with custom names or use automatic timestamps.
 - **Backup Management**: Restore, rename, or delete existing backups directly from the interface.
 
-## Technical Improvements (v0.2.0)
+## Technical Improvements (v0.2.1)
 
-- **Engine Alignment**: Aligned the Low-Level save engine 1:1 with GodMode9i/libnds standards.
-- **Bus Ownership**: Proper ARM9 bus management ensures stable communication with Slot-1.
-- **Page-Boundary Protection**: Implemented safe-writes for SPI Flash/EEPROM (Type 1: 16b, Type 2: 32b, Type 3: 256b).
-- **Path Logic**: Fixed save path construction to correctly use TWiLight Menu subfolders and proper file extensions.
-- **Filtering**: Automatically hides system tools like TWiLight Menu (`SRLA`) from the game list.
+- **Game Titles**: Render game titles that include non-ASCII symbols
+- **Font**: Add support for CJK characters in game titles (copied from TWiLight Menu++)
+- **Restores to Cartridges**: Fixed an issue where non-IR cartridges caused Snapshot to freeze when starting a restore process
 
 ## Controls
 
@@ -45,6 +43,6 @@ The project is built using the **BlocksDS** SDK and **devkitPro**.
 ## Credits
 
 - **[Edo9300](https://github.com/edo9300)**: Author of the robust save writing code for cartridges in GodMode9i.
-- **[RocketRobz](https://github.com/RocketRobz)**: Inspiration and reference code from **TWiLightMenu++** for reading .nds file information.
+- **[RocketRobz](https://github.com/RocketRobz)**: Inspiration and reference code from **TWiLightMenu++** for reading .nds file information and the font used in the application.
 - **[devkitPro](https://github.com/devkitPro)**: For providing **devkitARM** and **libnds**, the foundation of DS development.
 - **[BlocksDS](https://github.com/blocksds)**: For the modern **BlocksDS SDK** used to build this project.

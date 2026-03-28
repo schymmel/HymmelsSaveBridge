@@ -79,7 +79,7 @@ static void update_clock_cache(void) {
 
 static void draw_clock_bar(void) {
     consoleSelect(&topScreen);
-    printf("\x1b[0;0H%02d:%02d:%02d                 v0.2.0",
+    printf("\x1b[0;0H%02d:%02d:%02d                 v0.2.1",
            s_cached_clock_hour,
            s_cached_clock_minute,
            s_cached_clock_display_second);
