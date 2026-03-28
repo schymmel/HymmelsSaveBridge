@@ -2,7 +2,7 @@
 
 Snapshot is a powerful save management tool for the Nintendo DS, inspired by the 3DS save manager **Checkpoint**. It allows users to backup and restore save data from both SD card ROMs and physical Cartridges.
 
-![Snapshot UI](Screenshot.jpg)
+![Snapshot UI](Snapshot.jpg)
 
 ## Features
 
