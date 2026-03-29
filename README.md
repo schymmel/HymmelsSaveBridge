@@ -18,11 +18,10 @@ Snapshot is a powerful save management tool for the Nintendo DS, inspired by the
 - **Custom Backups**: Create save backups with custom names or use automatic timestamps.
 - **Backup Management**: Restore, rename, or delete existing backups directly from the interface.
 
-## Technical Improvements (v0.2.1)
+## Technical Improvements (v0.2.2)
 
-- **Game Titles**: Render game titles that include non-ASCII symbols
-- **Font**: Add support for CJK characters in game titles (copied from TWiLight Menu++)
-- **Restores to Cartridges**: Fixed an issue where non-IR cartridges caused Snapshot to freeze when starting a restore process
+- **Game Instances**: Fix an issue where the game instance selection was skipped in some cases
+- **X/Y Buttons**: Fix the X and Y buttons not working
 
 ## Controls
 
