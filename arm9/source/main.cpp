@@ -79,7 +79,7 @@ static void update_clock_cache(void) {
 
 static void draw_clock_bar(void) {
     consoleSelect(&topScreen);
-    printf("\x1b[0;0H%02d:%02d:%02d                 v0.2.1",
+    printf("\x1b[0;0H%02d:%02d:%02d                 v0.2.2",
            s_cached_clock_hour,
            s_cached_clock_minute,
            s_cached_clock_display_second);
@@ -198,7 +198,6 @@ void reload_backups(void) {
         g_current_backups = nullptr;
     }
     g_total_backups = 0;
-    g_selected_backup_idx = 0;
 
     if (g_selected_game) {
         g_current_backups = get_backups_for_game(g_selected_game->game_id);
@@ -338,8 +337,22 @@ static bool confirm_action(const char* action, const char* details) {
     while (1) {
         swiWaitForVBlank();
         scanKeys();
-        if (keysDown() & KEY_A) return true;
-        if (keysDown() & KEY_B) return false;
+        if (keysDown() & KEY_A) {
+            // Wait until key is released to avoid key "bleeding" into main loop
+            while (keysHeld() & KEY_A) {
+                swiWaitForVBlank();
+                scanKeys();
+            }
+            return true;
+        }
+        if (keysDown() & KEY_B) {
+            // Wait until key is released to avoid key "bleeding" into main loop
+            while (keysHeld() & KEY_B) {
+                swiWaitForVBlank();
+                scanKeys();
+            }
+            return false;
+        }
     }
 }
 
@@ -442,21 +455,21 @@ void draw_bottom_screen(void) {
             for (int x = 0; x < 163; x++) vram[y * 256 + x] = 210;
         }
 
-        for (int bt = 0; bt < 2; bt++) {
-            for (int y = 80 + bt * 40; y < 80 + bt * 40 + 35; y++) {
-                for (int x = 163; x < 256; x++) {
-                   if (y == 80 + bt * 40 || y == 80 + bt * 40 + 34 || x == 163 || x == 255)
-                       vram[y * 256 + x] = 212;
-                   else
-                       vram[y * 256 + x] = 211;
-                }
+        for (int y = 80; y < 184; y++) {
+            for (int x = 163; x < 256; x++) {
+               if (y == 80 || y == 183 || x == 163 || x == 255)
+                   vram[y * 256 + x] = 212;
+               else
+                   vram[y * 256 + x] = 211;
             }
         }
 
         int list_idx = g_selected_backup_idx;
-        for (int y = 78 + list_idx * 16; y < 78 + list_idx * 16 + 12; y++) {
-            if (y >= 184) break;
-            for (int x = 0; x < 163; x++) vram[y * 256 + x] = 213;
+        if (g_bottom_state == BSTATE_ACTION) {
+            for (int y = 78 + list_idx * 16; y < 78 + list_idx * 16 + 12; y++) {
+                if (y >= 184) break;
+                for (int x = 0; x < 163; x++) vram[y * 256 + x] = 213;
+            }
         }
 
         printf("\x1b[10;0H New...");
@@ -481,8 +494,14 @@ void draw_bottom_screen(void) {
             b_idx++;
         }
 
-        printf("\x1b[12;21HBackup [L]");
-        printf("\x1b[17;21HRestore [R]");
+        if (g_bottom_state == BSTATE_ACTION) {
+            printf("\x1b[12;21HBackup [L]");
+            printf("\x1b[15;21HRestore [R]");
+            printf("\x1b[18;21HDelete [X]");
+            printf("\x1b[21;21HRename [Y]");
+        } else {
+            printf("\x1b[18;21HSelect [A]");
+        }
 
         if (g_bottom_state == BSTATE_NONE) {
             printf("\x1b[23;0H Press [A] to backup or restore.");
@@ -574,6 +593,8 @@ int main(int argc, char **argv) {
 
         uint16_t keys_down = keysDown();
         uint16_t keys_held = keysHeld();
+        uint16_t keys_repeat = keysDownRepeat();
+
         if ((keys_held & KEY_L) && (keys_held & KEY_R) && (keys_down & KEY_SELECT)) {
             take_screenshot();
             consoleSelect(&bottomScreen);
@@ -593,9 +614,6 @@ int main(int argc, char **argv) {
         if (tick_frames % 60 == 0) {
             refresh_clock_only();
         }
-
-        keys_down = keysDown();
-        uint16_t keys_repeat = keysDownRepeat();
 
         if (g_bottom_state == BSTATE_NONE) {
             if (keys_repeat & KEY_UP) {
@@ -624,19 +642,46 @@ int main(int argc, char **argv) {
             }
 
             if (keys_down & KEY_A && g_selected_game && g_selected_game->instances) {
-                check_available_slots(get_instance_at_index(g_selected_instance_idx));
-                if (g_num_available_slots <= 1 && g_total_instances <= 1) {
-                   g_active_save_slot = g_available_slots[0];
-                   g_bottom_state = BSTATE_ACTION;
-                } else if (g_total_instances > 1) {
+                // First priority: if multiple instances exist, always select source first
+                if (g_total_instances > 1) {
                    g_bottom_state = BSTATE_SELECT_SRC;
                 } else {
-                   g_bottom_state = BSTATE_SELECT_SLOT;
+                   // Single instance - check slots
+                   check_available_slots(get_instance_at_index(g_selected_instance_idx));
+                   if (g_num_available_slots <= 1) {
+                      g_active_save_slot = g_available_slots[0];
+                      g_selected_backup_idx = 0; // Reset backup selection
+                      g_bottom_state = BSTATE_ACTION;
+                   } else {
+                      g_bottom_state = BSTATE_SELECT_SLOT;
+                   }
                 }
                 redraw_top = true;
                 redraw_bottom = true;
             }
-} else if (g_bottom_state == BSTATE_SELECT_SRC) {
+
+            if (keys_down & (KEY_L | KEY_R)) {
+                // First priority: if multiple instances exist, always select source first
+                if (g_total_instances > 1) {
+                    g_bottom_state = BSTATE_SELECT_SRC;
+                    redraw_bottom = true;
+                } else {
+                    // Single instance - check slots
+                    check_available_slots(get_instance_at_index(g_selected_instance_idx));
+                    if (g_num_available_slots <= 1) {
+                        g_active_save_slot = g_available_slots[0];
+                        g_selected_backup_idx = 0; // Reset backup selection
+                        g_bottom_state = BSTATE_ACTION;
+                        redraw_bottom = true;
+                    } else {
+                        g_bottom_state = BSTATE_SELECT_SLOT;
+                        redraw_bottom = true;
+                    }
+                }
+            }
+        }
+        
+        else if (g_bottom_state == BSTATE_SELECT_SRC) {
             if (keys_down & KEY_B) {
                 g_bottom_state = BSTATE_NONE;
                 redraw_top = true;
@@ -657,13 +702,16 @@ int main(int argc, char **argv) {
                 check_available_slots(get_instance_at_index(g_selected_instance_idx));
                 if (g_num_available_slots <= 1) {
                    g_active_save_slot = g_available_slots[0];
+                   g_selected_backup_idx = 0; // Reset backup selection
                    g_bottom_state = BSTATE_ACTION;
                 } else {
                    g_bottom_state = BSTATE_SELECT_SLOT;
                 }
                 redraw_bottom = true;
             }
-} else if (g_bottom_state == BSTATE_SELECT_SLOT) {
+        }
+        
+        else if (g_bottom_state == BSTATE_SELECT_SLOT) {
             if (keys_down & KEY_B) {
                 if (g_total_instances > 1) g_bottom_state = BSTATE_SELECT_SRC;
                 else g_bottom_state = BSTATE_NONE;
@@ -681,10 +729,13 @@ int main(int argc, char **argv) {
             }
             if (keys_down & KEY_A) {
                 g_active_save_slot = g_available_slots[g_selected_slot_menu_idx];
+                g_selected_backup_idx = 0; // Reset backup selection
                 g_bottom_state = BSTATE_ACTION;
                 redraw_bottom = true;
             }
-} else if (g_bottom_state == BSTATE_ACTION) {
+        }
+        
+        else if (g_bottom_state == BSTATE_ACTION) {
             if (keys_down & KEY_B) {
                 if (g_num_available_slots > 1) g_bottom_state = BSTATE_SELECT_SLOT;
                 else if (g_total_instances > 1) g_bottom_state = BSTATE_SELECT_SRC;
@@ -710,259 +761,285 @@ int main(int argc, char **argv) {
                 if (access(check_path, F_OK) != 0 && !target_inst->is_slot1) {
                     confirm_action("Error", "No save data found in this slot.");
                     redraw_bottom = true;
-                    continue;
-                }
-
-                if (g_selected_backup_idx > 0) {
-                   if (!confirm_action("Overwrite Backup", "Are you sure you want to overwrite?")) {
-                       redraw_bottom = true;
-                       continue;
-                   }
-                }
-
-                char backup_name[64] = "Backup";
-
-                if (g_selected_backup_idx > 0) {
-                   BackupInfo* b = g_current_backups;
-                   for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
-                   if (b) {
-                       snprintf(backup_name, 63, "%.62s", b->file_name);
-                       char* dot = strrchr(backup_name, '.');
-                       if (dot) *dot = '\0';
-                   }
                 } else {
-                   time_t t = time(nullptr);
-                   struct tm *tm = localtime(&t);
-                   snprintf(backup_name, 64, "%04d%02d%02d-%02d%02d%02d", tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-                }
+                    if (g_selected_backup_idx > 0) {
+                       if (!confirm_action("Overwrite Backup", "Are you sure you want to overwrite?")) {
+                           redraw_bottom = true;
+                           goto skip_actions;
+                       }
+                    }
 
-                int pos = strlen(backup_name);
-                bool do_backup = true;
+                    char backup_name[64] = "Backup";
 
-                if (g_selected_backup_idx == 0) {
-                   while (1) {
+                    if (g_selected_backup_idx > 0) {
+                       BackupInfo* b = g_current_backups;
+                       for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
+                       if (b) {
+                           snprintf(backup_name, 63, "%.62s", b->file_name);
+                           char* dot = strrchr(backup_name, '.');
+                           if (dot) *dot = '\0';
+                       }
+                    } else {
+                       time_t t = time(nullptr);
+                       struct tm *tm = localtime(&t);
+                       snprintf(backup_name, 64, "%04d%02d%02d-%02d%02d%02d", tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
+                    }
+
+                    int pos = strlen(backup_name);
+                    bool do_backup = true;
+
+                    if (g_selected_backup_idx == 0) {
+                       while (1) {
+                           swiWaitForVBlank();
+                           scanKeys();
+                           uint16_t kb_down = keysDown();
+                           uint16_t kb_repeat = keysDownRepeat();
+
+                           uint8_t* vram = (uint8_t*)bgGetGfxPtr(g_bgBottom);
+                           dmaCopy(bg_bottomBitmap, vram, 64 * 1024);
+
+                           consoleSelect(&bottomScreen);
+                           consoleClear();
+                           printf("\x1b[0;0H[ Custom Backup Name ]\n\n> %s_\n\nUP/DOWN: Change Letter\nA: Next Letter\nB: Backspace\nSTART: Confirm\nSELECT: Cancel", backup_name);
+
+                           char c = backup_name[pos];
+                           if (c == '\0') c = 'A';
+
+                           if (kb_repeat & KEY_UP) {
+                               if (c == 'A') c = '9';
+                               else if (c == '0') c = 'Z';
+                               else c--;
+                           }
+                           if (kb_repeat & KEY_DOWN) {
+                               if (c == '9') c = 'A';
+                               else if (c == 'Z') c = '0';
+                               else c++;
+                           }
+
+                           backup_name[pos] = c;
+                           backup_name[pos+1] = '\0';
+
+                           if (kb_repeat & KEY_LEFT) {
+                               if (pos > 0) pos--;
+                           }
+                           if (kb_repeat & KEY_RIGHT) {
+                               if (pos < 60 && backup_name[pos] != '\0') pos++;
+                           }
+
+                           if (kb_down & KEY_A) {
+                               if (pos < 60) pos++;
+                           }
+                           if (kb_down & KEY_B) {
+                               if (pos > 0) {
+                                   backup_name[pos] = '\0';
+                                   pos--;
+                               }
+                           }
+                           if (kb_down & KEY_START) {
+                               break;
+                           }
+                           if (kb_down & KEY_SELECT) {
+                               backup_name[0] = '\0';
+                               do_backup = false;
+                               break;
+                           }
+                       }
+                    }
+
+                    if (do_backup && backup_name[0] != '\0') {
+                       consoleSelect(&bottomScreen);
+                       consoleClear();
+                       printf("\n  Creating Backup...\n");
                        swiWaitForVBlank();
-                       scanKeys();
-                       uint16_t kb_down = keysDown();
-                       uint16_t kb_repeat = keysDownRepeat();
+
+                       g_block_slot1_refresh = true;
+                       GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
+
+                       GameInstance temp_inst = *target_inst;
+                       get_slot_path(temp_inst.save_path, target_inst, g_active_save_slot);
+
+                       const char* err = create_backup(&temp_inst, g_selected_game->game_id, backup_name);
+                       g_block_slot1_refresh = false;
 
                        uint8_t* vram = (uint8_t*)bgGetGfxPtr(g_bgBottom);
                        dmaCopy(bg_bottomBitmap, vram, 64 * 1024);
 
                        consoleSelect(&bottomScreen);
                        consoleClear();
-                       printf("\x1b[0;0H[ Custom Backup Name ]\n\n> %s_\n\nUP/DOWN: Change Letter\nA: Next Letter\nB: Backspace\nSTART: Confirm\nSELECT: Cancel", backup_name);
-
-                       char c = backup_name[pos];
-                       if (c == '\0') c = 'A';
-
-                       if (kb_repeat & KEY_UP) {
-                           if (c == 'A') c = '9';
-                           else if (c == '0') c = 'Z';
-                           else c--;
-                       }
-                       if (kb_repeat & KEY_DOWN) {
-                           if (c == '9') c = 'A';
-                           else if (c == 'Z') c = '0';
-                           else c++;
+                       if (err == nullptr) {
+                           printf("\x1b[0;0HSUCCESS!\n\nBackup created.");
+                           reload_backups();
+                       } else {
+                           printf("\x1b[0;0HFAILED:\n\n%s", err);
                        }
 
-                       backup_name[pos] = c;
-                       backup_name[pos+1] = '\0';
-
-                       if (kb_repeat & KEY_LEFT) {
-                           if (pos > 0) pos--;
+                       printf("\n\nPress A or B to continue.");
+                       while (1) {
+                           swiWaitForVBlank();
+                           scanKeys();
+                           refresh_clock_only();
+                           if (keysDown() & (KEY_B | KEY_A)) break;
                        }
-                       if (kb_repeat & KEY_RIGHT) {
-                           if (pos < 60 && backup_name[pos] != '\0') pos++;
-                       }
-
-                       if (kb_down & KEY_A) {
-                           if (pos < 60) pos++;
-                       }
-                       if (kb_down & KEY_B) {
-                           if (pos > 0) {
-                               backup_name[pos] = '\0';
-                               pos--;
-                           }
-                       }
-                       if (kb_down & KEY_START) {
-                           break;
-                       }
-                       if (kb_down & KEY_SELECT) {
-                           backup_name[0] = '\0';
-                           do_backup = false;
-                           break;
-                       }
-                   }
-                }
-
-                if (do_backup && backup_name[0] != '\0') {
-                   consoleSelect(&bottomScreen);
-                   consoleClear();
-                   printf("\n  Creating Backup...\n");
-                   swiWaitForVBlank();
-
-                   g_block_slot1_refresh = true;
-                   GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
-
-                   GameInstance temp_inst = *target_inst;
-                   get_slot_path(temp_inst.save_path, target_inst, g_active_save_slot);
-
-                   const char* err = create_backup(&temp_inst, g_selected_game->game_id, backup_name);
-                   g_block_slot1_refresh = false;
-
-                   uint8_t* vram = (uint8_t*)bgGetGfxPtr(g_bgBottom);
-                   dmaCopy(bg_bottomBitmap, vram, 64 * 1024);
-
-                   consoleSelect(&bottomScreen);
-                   consoleClear();
-                   if (err == nullptr) {
-                       printf("\x1b[0;0HSUCCESS!\n\nBackup created.");
-                       reload_backups();
-                   } else {
-                       printf("\x1b[0;0HFAILED:\n\n%s", err);
-                   }
-
-                   printf("\n\nPress A or B to continue.");
-                   while (1) {
-                       swiWaitForVBlank();
-                       scanKeys();
-                       refresh_clock_only();
-                       if (keysDown() & (KEY_B | KEY_A)) break;
-                   }
-                }
-                redraw_bottom = true;
-} else if (keys_down & KEY_R && g_selected_backup_idx > 0) {
-                BackupInfo* b = g_current_backups;
-                for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
-
-                GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
-                const char* confirm_msg = target_inst->is_slot1 ? "Overwrite cartridge with backup?" : "Overwrite save with backup?";
-
-                if (b && confirm_action("Restore Backup", confirm_msg)) {
-                   consoleSelect(&bottomScreen);
-                   consoleClear();
-                   printf("\n  Restoring Backup...\n  %s\n", b->file_name);
-                   swiWaitForVBlank();
-
-                   g_block_slot1_refresh = true;
-                   GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
-                   GameInstance temp_inst = *target_inst;
-                   get_slot_path(temp_inst.save_path, target_inst, g_active_save_slot);
-
-                   const char* err = restore_backup(&temp_inst, b->full_path);
-                   g_block_slot1_refresh = false;
-
-                   uint8_t* vram = (uint8_t*)bgGetGfxPtr(g_bgBottom);
-                   dmaCopy(bg_bottomBitmap, vram, 64 * 1024);
-
-                   consoleSelect(&bottomScreen);
-                   consoleClear();
-                   if (err == nullptr) {
-                       printf("\x1b[0;0HSUCCESS!\n\nBackup restored.");
-                   } else {
-                       printf("\x1b[0;0HFAILED:\n\n%s", err);
-                   }
-
-                   printf("\n\nPress A or B to continue.");
-                   while (1) {
-                       swiWaitForVBlank();
-                       scanKeys();
-                       refresh_clock_only();
-                       if (keysDown() & (KEY_B | KEY_A)) break;
-                   }
-                }
-                redraw_bottom = true;
-            } else if (keys_down & KEY_R && g_selected_backup_idx == 0) {
-                // User pressed R but no backup is selected - show error
-                confirm_action("No Backup Selected", "Select a backup to restore first.");
-                redraw_bottom = true;
-            } else if (keys_down & KEY_X && g_selected_backup_idx > 0) {
-                BackupInfo* b = g_current_backups;
-                for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
-                if (b && confirm_action("Delete Backup", "Are you sure you want to delete this?")) {
-                   unlink(b->full_path);
-                   g_selected_backup_idx--;
-                   reload_backups();
-                }
-                redraw_bottom = true;
-            } else if (keys_down & KEY_Y && g_selected_backup_idx > 0) {
-                BackupInfo* b = g_current_backups;
-                for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
-                if (b) {
-                   char rename_buf[64] = "Renamed";
-                   snprintf(rename_buf, 63, "%.62s", b->file_name);
-                   char* dot = strrchr(rename_buf, '.');
-                   if (dot) *dot = '\0';
-
-                   int pos = strlen(rename_buf);
-
-                   while (1) {
-                       swiWaitForVBlank();
-                       scanKeys();
-                       uint16_t kb_down = keysDown();
-                       uint16_t kb_repeat = keysDownRepeat();
-
-                       uint8_t* vram = (uint8_t*)bgGetGfxPtr(g_bgBottom);
-                       dmaCopy(bg_bottomBitmap, vram, 64 * 1024);
-
-                       consoleSelect(&bottomScreen);
-                       consoleClear();
-                       printf("\x1b[0;0H[ Rename Backup ]\n\n> %s_\n\nUP/DOWN: Change Letter\nA: Next Letter\nB: Backspace\nSTART: Confirm\nSELECT: Cancel", rename_buf);
-
-                       char c = rename_buf[pos];
-                       if (c == '\0') c = 'A';
-
-                       if (kb_repeat & KEY_UP) {
-                           if (c == 'A') c = '9';
-                           else if (c == '0') c = 'Z';
-                           else c--;
-                       }
-                       if (kb_repeat & KEY_DOWN) {
-                           if (c == '9') c = 'A';
-                           else if (c == 'Z') c = '0';
-                           else c++;
-                       }
-
-                       rename_buf[pos] = c;
-                       rename_buf[pos+1] = '\0';
-
-                       if (kb_repeat & KEY_LEFT) {
-                           if (pos > 0) pos--;
-                       }
-                       if (kb_repeat & KEY_RIGHT) {
-                           if (pos < 60 && rename_buf[pos] != '\0') pos++;
-                       }
-
-                       if (kb_down & KEY_A) {
-                           if (pos < 60) pos++;
-                       }
-                       if (kb_down & KEY_B) {
-                           if (pos > 0) {
-                               rename_buf[pos] = '\0';
-                               pos--;
-                           }
-                       }
-                       if (kb_down & KEY_START) {
-                           break;
-                       }
-                       if (kb_down & KEY_SELECT) {
-                           rename_buf[0] = '\0';
-                           break;
-                       }
-                   }
-
-                   if (rename_buf[0] != '\0') {
-                       char new_path[512];
-                       snprintf(new_path, sizeof(new_path), "sd:/_nds/snapshot/backups/%s/%s.sav", g_selected_game->game_id, rename_buf);
-                       rename(b->full_path, new_path);
-                   }
-
-                   reload_backups();
-                   redraw_bottom = true;
+                    }
+                    redraw_bottom = true;
                 }
             }
+            
+            if (keys_down & KEY_R) {
+                if (g_selected_backup_idx > 0) {
+                    BackupInfo* b = g_current_backups;
+                    for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
+
+                    GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
+                    const char* confirm_msg = target_inst->is_slot1 ? "Overwrite cartridge with backup?" : "Overwrite save with backup?";
+
+                    if (b && confirm_action("Restore Backup", confirm_msg)) {
+                       consoleSelect(&bottomScreen);
+                       consoleClear();
+                       printf("\n  Restoring Backup...\n  %s\n", b->file_name);
+                       swiWaitForVBlank();
+
+                       g_block_slot1_refresh = true;
+                       GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
+                       GameInstance temp_inst = *target_inst;
+                       get_slot_path(temp_inst.save_path, target_inst, g_active_save_slot);
+
+                       const char* err = restore_backup(&temp_inst, b->full_path);
+                       g_block_slot1_refresh = false;
+
+                       uint8_t* vram = (uint8_t*)bgGetGfxPtr(g_bgBottom);
+                       dmaCopy(bg_bottomBitmap, vram, 64 * 1024);
+
+                       consoleSelect(&bottomScreen);
+                       consoleClear();
+                       if (err == nullptr) {
+                           printf("\x1b[0;0HSUCCESS!\n\nBackup restored.");
+                       } else {
+                           printf("\x1b[0;0HFAILED:\n\n%s", err);
+                       }
+
+                       printf("\n\nPress A or B to continue.");
+                       while (1) {
+                           swiWaitForVBlank();
+                           scanKeys();
+                           refresh_clock_only();
+                           if (keysDown() & (KEY_B | KEY_A)) break;
+                       }
+                    }
+                } else {
+                    confirm_action("No Backup Selected", "Select a backup to restore first.");
+                }
+                redraw_bottom = true;
+            }
+            
+            if (keys_down & KEY_X) {
+                if (g_selected_backup_idx > 0) {
+                    BackupInfo* b = g_current_backups;
+                    for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
+                    if (b && confirm_action("Delete Backup", "Are you sure you want to delete this?")) {
+                       unlink(b->full_path);
+                       reload_backups();
+                       if (g_selected_backup_idx > g_total_backups) g_selected_backup_idx = g_total_backups;
+                    }
+                } else {
+                    GameInstance* target_inst = get_instance_at_index(g_selected_instance_idx);
+                    char check_path[MAX_PATH_LEN + 16];
+                    get_slot_path(check_path, target_inst, g_active_save_slot);
+                    if (target_inst->is_slot1) {
+                        confirm_action("Error", "Cannot delete Cartridge save slot.");
+                    } else if (access(check_path, F_OK) == 0) {
+                        if (confirm_action("Delete Save Slot", "Are you sure you want to delete this save?")) {
+                           unlink(check_path);
+                        }
+                    } else {
+                        confirm_action("Error", "No save data found in this slot.");
+                    }
+                }
+                redraw_bottom = true;
+            }
+            
+            if (keys_down & KEY_Y) {
+                
+                if (g_selected_backup_idx > 0) {
+                    BackupInfo* b = g_current_backups;
+                    for(int c=1; c<g_selected_backup_idx && b; c++) b=b->next;
+                    if (b) {
+                       char rename_buf[64] = {0};
+                       snprintf(rename_buf, sizeof(rename_buf), "%.63s", b->file_name);
+                       char* dot = strrchr(rename_buf, '.');
+                       if (dot) *dot = '\0';
+    
+                       int pos = strlen(rename_buf);
+    
+                       while (1) {
+                           swiWaitForVBlank();
+                           scanKeys();
+                           uint16_t kb_down = keysDown();
+                           uint16_t kb_repeat = keysDownRepeat();
+    
+                           uint8_t* vram = (uint8_t*)bgGetGfxPtr(g_bgBottom);
+                           dmaCopy(bg_bottomBitmap, vram, 64 * 1024);
+    
+                           consoleSelect(&bottomScreen);
+                           consoleClear();
+                           printf("\x1b[0;0H[ Rename Backup ]\n\n> %s_\n\nUP/DOWN: Change Letter\nA: Next Letter\nB: Backspace\nSTART: Confirm\nSELECT: Cancel", rename_buf);
+    
+                           char c = rename_buf[pos];
+                           if (c == '\0') c = 'A';
+    
+                           if (kb_repeat & KEY_UP) {
+                               if (c == 'A') c = '9';
+                               else if (c == '0') c = 'Z';
+                               else c--;
+                           }
+                           if (kb_repeat & KEY_DOWN) {
+                               if (c == '9') c = 'A';
+                               else if (c == 'Z') c = '0';
+                               else c++;
+                           }
+    
+                           rename_buf[pos] = c;
+                           rename_buf[pos+1] = '\0';
+    
+                           if (kb_repeat & KEY_LEFT) {
+                               if (pos > 0) pos--;
+                           }
+                           if (kb_repeat & KEY_RIGHT) {
+                               if (pos < 60 && rename_buf[pos] != '\0') pos++;
+                           }
+    
+                           if (kb_down & KEY_A) {
+                               if (pos < 60) pos++;
+                           }
+                           if (kb_down & KEY_B) {
+                               if (pos > 0) {
+                                   rename_buf[pos] = '\0';
+                                   pos--;
+                               }
+                           }
+                           if (kb_down & KEY_START) {
+                               break;
+                           }
+                           if (kb_down & KEY_SELECT) {
+                               rename_buf[0] = '\0';
+                               break;
+                           }
+                       }
+    
+                       if (rename_buf[0] != '\0') {
+                           char new_path[512];
+                           snprintf(new_path, sizeof(new_path), "sd:/_nds/snapshot/backups/%s/%s.sav", g_selected_game->game_id, rename_buf);
+                           rename(b->full_path, new_path);
+                       }
+    
+                       reload_backups();
+                    }
+                } else {
+                    confirm_action("Error", "Cannot rename active Save Slots, only Backups.");
+                }
+                redraw_bottom = true;
+            }
+            skip_actions:;
         }
 
         if (keys_down & KEY_START) {

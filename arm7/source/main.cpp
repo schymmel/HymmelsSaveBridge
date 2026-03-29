@@ -11,5 +11,6 @@ int main(int argc, char **argv) {
     irqEnable(IRQ_VBLANK);
     while (1) {
         swiWaitForVBlank();
+        inputGetAndSend();
     }
 }
